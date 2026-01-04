@@ -1,0 +1,249 @@
+import logging
+from collections import OrderedDict
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn.parallel import DataParallel, DistributedDataParallel
+import models.networks as networks
+import models.lr_scheduler as lr_scheduler
+from .base_model import BaseModel
+from models.loss import CharbonnierLoss, CharbonnierLoss2,VGGLoss,ColorLoss
+from models import pytorch_ssim
+from thop import profile
+import time
+
+logger = logging.getLogger('base')
+
+
+class VideoBaseModel(BaseModel):
+    def __init__(self, opt):
+        super(VideoBaseModel, self).__init__(opt)
+
+        if opt['dist']:
+            self.rank = torch.distributed.get_rank()
+        else:
+            self.rank = -1  # non dist training
+        train_opt = opt['train']
+
+        # define network and load pretrained models
+        self.netG = networks.define_G(opt).to(self.device)
+        if opt['dist']:
+            self.netG = DistributedDataParallel(self.netG, device_ids=[torch.cuda.current_device()])
+        else:
+            self.netG = DataParallel(self.netG)
+        # print network
+        self.print_network()
+        self.load()
+
+        if self.is_train:
+            self.netG.train()
+
+            #### loss
+            loss_type = train_opt['pixel_criterion']
+            if loss_type == 'l1':
+                self.cri_pix = nn.L1Loss(reduction='sum').to(self.device)
+            elif loss_type == 'l2':
+                self.cri_pix = nn.MSELoss(reduction='sum').to(self.device)
+            elif loss_type == 'cb':
+                self.cri_pix = CharbonnierLoss().to(self.device)
+            elif loss_type == 'cb2':
+                self.cri_pix = CharbonnierLoss2().to(self.device)
+            else:
+                raise NotImplementedError('Loss type [{:s}] is not recognized.'.format(loss_type))
+            self.l_pix_w = train_opt['pixel_weight']
+
+            self.cri_pix_ill = nn.L1Loss(reduction='sum').to(self.device)
+            self.vggloss = VGGLoss().to(self.device)
+            self.l_ssim = pytorch_ssim.SSIM(window_size=11)
+            self.l_colour = ColorLoss()
+
+            #### optimizers
+            wd_G = train_opt['weight_decay_G'] if train_opt['weight_decay_G'] else 0
+            if train_opt['ft_tsa_only']:
+                normal_params = []
+                tsa_fusion_params = []
+                for k, v in self.netG.named_parameters():
+                    if v.requires_grad:
+                        if 'tsa_fusion' in k:
+                            tsa_fusion_params.append(v)
+                        else:
+                            normal_params.append(v)
+                    else:
+                        if self.rank <= 0:
+                            logger.warning('Params [{:s}] will not optimize.'.format(k))
+                optim_params = [
+                    {  # add normal params first
+                        'params': normal_params,
+                        'lr': train_opt['lr_G']
+                    },
+                    {
+                        'params': tsa_fusion_params,
+                        'lr': train_opt['lr_G']
+                    },
+                ]
+            else:
+                optim_params = []
+                for k, v in self.netG.named_parameters():
+                    if v.requires_grad:
+                        optim_params.append(v)
+                    else:
+                        if self.rank <= 0:
+                            logger.warning('Params [{:s}] will not optimize.'.format(k))
+
+            self.optimizer_G = torch.optim.Adam(optim_params, lr=train_opt['lr_G'],
+                                                weight_decay=wd_G,
+                                                betas=(train_opt['beta1'], train_opt['beta2']))
+            self.optimizers.append(self.optimizer_G)
+
+            #### schedulers
+            if train_opt['lr_scheme'] == 'MultiStepLR':
+                for optimizer in self.optimizers:
+                    self.schedulers.append(
+                        lr_scheduler.MultiStepLR_Restart(optimizer, train_opt['lr_steps'],
+                                                         restarts=train_opt['restarts'],
+                                                         weights=train_opt['restart_weights'],
+                                                         gamma=train_opt['lr_gamma'],
+                                                         clear_state=train_opt['clear_state']))
+            elif train_opt['lr_scheme'] == 'CosineAnnealingLR_Restart':
+                for optimizer in self.optimizers:
+                    self.schedulers.append(
+                        lr_scheduler.CosineAnnealingLR_Restart(
+                            optimizer, train_opt['T_period'], eta_min=train_opt['eta_min'],
+                            restarts=train_opt['restarts'], weights=train_opt['restart_weights']))
+            else:
+                raise NotImplementedError()
+
+            self.log_dict = OrderedDict()
+
+    def feed_data(self, data, need_GT=True):
+        self.var_L = data['LQs'].to(self.device)
+        self.var_L2 = data['LQs2'].to(self.device)
+        self.var_L4 = data['LQs4'].to(self.device)
+        # self.nf = data['nf'].to(self.device)
+        # self.gm = data['gm'].to(self.device)
+        if need_GT:
+            self.real_H = data['GT'].to(self.device)
+
+    def set_params_lr_zero(self):
+        # fix normal module
+        self.optimizers[0].param_groups[0]['lr'] = 0
+
+    def optimize_parameters(self, step):
+        if self.opt['train']['ft_tsa_only'] and step < self.opt['train']['ft_tsa_only']:
+            self.set_params_lr_zero()
+
+        self.optimizer_G.zero_grad()
+
+        self.fake_H = self.netG(self.var_L, self.var_L2, self.var_L4)
+
+        l_pix = self.l_pix_w * self.cri_pix(self.fake_H, self.real_H)
+        l_vgg = 0.1*self.vggloss(self.fake_H, self.real_H)
+        l_ssim = self.l_ssim(self.fake_H, self.real_H)
+        l_colour = 0.5 * self.l_colour(self.fake_H, self.real_H)
+        l_final = l_pix + l_vgg + l_ssim + l_colour
+        # l_final = l_pix + l_vgg + l_colour
+
+        l_final.backward()
+        self.optimizer_G.step()
+        self.log_dict['l_pix'] = l_pix.item()
+        self.log_dict['l_vgg'] = l_vgg.item()
+        self.log_dict['l_ssim'] = l_ssim.item()
+        self.log_dict['l_colour'] = l_colour.item()
+
+    def test(self):
+        self.netG.eval()
+        with torch.no_grad():
+            self.fake_H = self.netG(self.var_L, self.var_L2, self.var_L4)
+        self.netG.train()
+
+    def test4(self):
+        self.netG.eval()
+        self.fake_H = None
+        with torch.no_grad():
+            B, C, H, W = self.var_L.size()
+
+
+            torch.cuda.empty_cache()
+
+            var_L = self.var_L.clone().view(B, C, H, W)
+            H_new = 400
+            W_new = 608
+            var_L = F.interpolate(var_L, size=[H_new, W_new], mode='bilinear')
+            var_L = var_L.view(B, C, H_new, W_new)
+            self.fake_H = self.netG(self.var_L, self.var_L2, self.var_L4)
+
+            # self.fake_H = self.netG(var_L, mask)
+            self.fake_H = F.interpolate(self.fake_H, size=[H, W], mode='bilinear')
+
+            del var_L
+            torch.cuda.empty_cache()
+
+        self.netG.train()
+
+
+    def test5(self):
+        self.netG.eval()
+        self.fake_H = None
+        with torch.no_grad():
+            B, C, H, W = self.var_L.size()
+
+            torch.cuda.empty_cache()
+
+            var_L = self.var_L.clone().view(B, C, H, W)
+            H_new = 384
+            W_new = 384
+            var_L = F.interpolate(var_L, size=[H_new, W_new], mode='bilinear')
+
+            var_L = var_L.view(B, C, H_new, W_new)
+            self.fake_H = self.netG(var_L, mask)
+            self.fake_H = F.interpolate(self.fake_H, size=[H, W], mode='bilinear')
+
+            del var_L
+            del mask
+            torch.cuda.empty_cache()
+
+        self.netG.train()
+
+
+    def get_current_log(self):
+        return self.log_dict
+
+    def get_current_visuals(self, need_GT=True):
+        out_dict = OrderedDict()
+
+
+
+        out_dict['LQ'] = self.var_L.detach()[0].float().cpu()
+        out_dict['rlt'] = self.fake_H.detach()[0].float().cpu()
+
+        if need_GT:
+            out_dict['GT'] = self.real_H.detach()[0].float().cpu()
+
+
+        del self.real_H
+        del self.var_L
+        del self.fake_H
+        torch.cuda.empty_cache()
+        return out_dict
+
+
+    def print_network(self):
+        s, n = self.get_network_description(self.netG)
+        if isinstance(self.netG, nn.DataParallel):
+            net_struc_str = '{} - {}'.format(self.netG.__class__.__name__,
+                                             self.netG.module.__class__.__name__)
+        else:
+            net_struc_str = '{}'.format(self.netG.__class__.__name__)
+        if self.rank <= 0:
+            logger.info('Network G structure: {}, with parameters: {:,d}'.format(net_struc_str, n))
+            logger.info(s)
+
+    def load(self):
+        load_path_G = self.opt['path']['pretrain_model_G']
+        if load_path_G is not None:
+            logger.info('Loading model for G [{:s}] ...'.format(load_path_G))
+            self.load_network(load_path_G, self.netG, self.opt['path']['strict_load'])
+
+    def save(self, iter_label):
+        self.save_network(self.netG, 'G', iter_label)
