@@ -1,99 +1,80 @@
-# 
+<div align="center">
 
-# 
+# How Local Details Meet Global Structures  
+## A Parallel Multi-Scale Dual-Branch Network for Low-Light Image Enhancement
 
-# <div align="center">
+</div>
 
-# <h1>How Local Details Meet Global Structures: A Parallel Multi-Scale Dual-Branch Network for Low-Light Image Enhancement</h1>
+---
 
-# <div>
+<div align="center">
+  <img src="Figure/Fig1.png" alt="Overview of BDMD-Net" width="90%" />
+</div>
 
-# 
+---
 
-# <img src="Figure\\Fig1.png" alt="fig1"  />
+## 🔑 Core Contributions
 
-# 
+- **BDMD-Net**:  
+  We propose a novel **Brightness–Detail coordinated Multi-scale Dual-branch Network (BDMD-Net)** for low-light image enhancement.  
+  The framework leverages **Transformers** to model global brightness distribution and **CNNs** to capture fine-grained local details.
 
-# \# The core innovation points of the paper
+- **Cross-scale Brightness-Guided Attention (CBGA)**:  
+  A cross-scale attention mechanism is introduced to enhance interactions among different feature scales by explicitly incorporating **brightness priors** derived from low-light inputs.
 
-# 
+- **Frequency-Domain Phase–Amplitude Separated Fusion**:  
+  We design an effective feature fusion strategy that separates **phase** and **amplitude** components in the frequency domain.  
+  This strategy independently models **global structural information** and **local texture details**, effectively avoiding feature aliasing while preserving fine details.
 
-# 1.We propose a novel brightness-detail-coordinated multi-scale dual-branch framework termed BDMD-Net for low-light image enhancement by leveraging Transformer and CNNs to learn global brightness and local details.
+---
 
-# 
+## 🧩 Core Module Description
 
-# 2.We introduce a cross-scale brightness-guided attention (CBGA) to enhance the interaction between different scales by incorporating the brightness prior in input low-light images.
+<div align="center">
+  <img src="Figure/Fig2.png" alt="Core modules of BDMD-Net" width="90%" />
+</div>
 
-# 
+**Module illustration:**
 
-# 3.We propose an effective feature fusion strategy that separates the phase and the amplitude in the frequency domain. The applied strategy separately deals with the global structure and local details in the target image and thus avoids feature aliasing while preserving image details.
+- **(a)** Brightness prior learning module  
+- **(b)** CBGA (Case 2)  
+- **(c)** CBGA (Case 3)  
+- **(d)** APSF: Amplitude–Phase Separated Fusion module  
 
-# 
+---
 
-# 
+## 📊 Experimental Results
 
-# 
+<div align="center">
+  <img src="Figure/Fig3.png" alt="Results on LOL datasets" width="90%" />
+</div>
 
+<div align="center">
+  <img src="Figure/Fig4.png" alt="Results on SMID dataset" width="90%" />
+</div>
 
-# 
+**Visual comparisons** of different approaches on  
+**LOLv1**, **LOLv2-real**, **LOLv2-synthetic**, and **SMID** datasets.
 
-# 
+---
 
-# 
+<div align="center">
+  <img src="Figure/Fig5.png" alt="Comparison with MIR" width="90%" />
+</div>
 
-# \# Core Module Description
+**Visual comparison between BDMD-Net and MIR** across four benchmark datasets.
 
-# 
+---
 
-# <img src="Figure\\Fig2.png" alt="fig2"  />
+## 📌 Notes
 
-# 
+- This repository provides the implementation of **BDMD-Net**.
+- Please refer to the paper for more architectural and theoretical details.
 
-# \*\*The illustration of our designed modules.(a) is the brightness prior learning, (b) is the case 2 of CBGA, (c) is the case 3 of CBGA, and (d) is the APSF\*\*
+---
 
-# 
+<div align="center">
 
-# 
+✨ *If you find this work useful, please consider citing our paper.* ✨
 
-# 
-
-# 
-
-# 
-
-# \# Result
-
-# 
-
-# <img src="Figure\\Fig3.png" alt="fig3"  />
-
-# <img src="Figure\\Fig4.png" alt="fig3"  />
-
-# &nbsp;\*\*Visual comparisons of different approaches on the LOLv1, LOLv2-real, LOLv2-synthetic and SMID datasets\*\*
-
-# 
-
-# 
-
-# 
-
-# 
-
-# 
-
-# <img src="Figure\\Fig5.png" alt="fig3"  />
-
-# 
-
-# \*\*The visual comparisons of ours and MIR on four datasets\*\*
-
-# 
-
-
-
-
-
-
-
-
-
+</div>
